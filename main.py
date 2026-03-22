@@ -11,9 +11,9 @@ from moviepy import VideoFileClip
 load_dotenv()
 
 # --- Configuratoin ---
-VIDEO_FILE_PATH = "test/test.mp4"
+VIDEO_FILE_PATH = "test/BHG-049.mp4"
 AUDIO_FILE_PATH = "temp_audio.wav"
-SOURCE_LANGUAGE = "de-DE"
+SOURCE_LANGUAGE = "ja-JP"
 PROJECT_ID = os.environ.get("GCP_PROJECT_ID")
 BUCKET_NAME = os.environ.get("GCP_BUCKET_NAME")
 
@@ -35,9 +35,11 @@ def format_srt_time(time_delta):
 
 def chunk_translated_text_by_time(translated_text, start_time_delta, end_time_delta):
     """
-    Takes a fully translated English block, counts words, and uses the
-    German total duration to divide it into evenly timed SRT sub-blocks.
+    Groups English words into bite-sized SRT sub-blocks based on timeline interpolation,
+    and intelligently merges micro-blocks (less than 1.2s) to prevent unreadable single-word flicker.
     """
+    MIN_DURATION = 1.2  # Minimum readable duration for a subtitle block in seconds
+
     words = translated_text.split()
     if not words:
         return []
@@ -45,9 +47,10 @@ def chunk_translated_text_by_time(translated_text, start_time_delta, end_time_de
     total_duration = (end_time_delta - start_time_delta).total_seconds()
     time_per_word = total_duration / len(words)
 
-    chunks = []
+    raw_chunks = []
     current_chunk_words = []
 
+    # --- Phase 1: Build Raw Chunks (Your existing logic) ---
     for i, word in enumerate(words):
         current_chunk_words.append(word)
         word_text = word.strip()
@@ -56,7 +59,6 @@ def chunk_translated_text_by_time(translated_text, start_time_delta, end_time_de
         is_sentence_end = word_text.endswith(PUNCTUATION_SPLITS)
 
         if reached_max or is_sentence_end:
-            # Determine timings based on word index
             chunk_start_idx = i - len(current_chunk_words) + 1
             chunk_end_idx = i
 
@@ -67,7 +69,7 @@ def chunk_translated_text_by_time(translated_text, start_time_delta, end_time_de
                 seconds=(chunk_end_idx + 1) * time_per_word
             )
 
-            chunks.append(
+            raw_chunks.append(
                 {
                     "text": " ".join(current_chunk_words),
                     "start": chunk_start_time,
@@ -78,22 +80,50 @@ def chunk_translated_text_by_time(translated_text, start_time_delta, end_time_de
 
     if current_chunk_words:
         chunk_start_idx = len(words) - len(current_chunk_words)
-        chunk_end_idx = len(words) - 1
-
         chunk_start_time = start_time_delta + timedelta(
             seconds=chunk_start_idx * time_per_word
         )
-        chunk_end_time = end_time_delta  # Hard stop at the actual end of the audio
-
-        chunks.append(
+        raw_chunks.append(
             {
                 "text": " ".join(current_chunk_words),
                 "start": chunk_start_time,
-                "end": chunk_end_time,
+                "end": end_time_delta,
             }
         )
 
-    return chunks
+    if not raw_chunks:
+        return []
+
+    merged_chunks = []
+    i = 0
+
+    while i < len(raw_chunks):
+        current = raw_chunks[i]
+        duration = (current["end"] - current["start"]).total_seconds()
+
+        # If it's too short, let's see if we can merge it
+        if duration < MIN_DURATION:
+            if i == len(raw_chunks) - 1 and len(merged_chunks) > 0:
+                merged_chunks[-1]["text"] += " " + current["text"]
+                merged_chunks[-1]["end"] = current["end"]
+                i += 1
+                continue
+
+            elif i + 1 < len(raw_chunks):
+                next_chunk = raw_chunks[i + 1]
+                next_chunk["text"] = current["text"] + " " + next_chunk["text"]
+                next_chunk["start"] = current["start"]  # Absorb the time
+                # We do not push current to merged_chunks; it gets absorbed by next loop
+                i += 1
+                continue
+
+            else:
+                current["end"] = current["start"] + timedelta(seconds=MIN_DURATION)
+
+        merged_chunks.append(current)
+        i += 1
+
+    return merged_chunks
 
 
 def wrap_text_to_lines(text, max_chars=MAX_CHARS_PER_LINE):
@@ -161,7 +191,7 @@ def main():
             audio_channel_count=2,
         )
         operation = speech_client.long_running_recognize(config=config, audio=audio)
-        response = operation.result(timeout=600)
+        response = operation.result(timeout=3600)
 
         print("[4/5] Translating full context and interpolating subtitle timings...")
 
