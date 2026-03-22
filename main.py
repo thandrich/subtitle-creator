@@ -1,3 +1,4 @@
+import html
 import math
 import os
 from datetime import timedelta
@@ -32,26 +33,66 @@ def format_srt_time(time_delta):
     return f"{hours:02}:{minutes:02}:{seconds:02},{miliseconds:03}"
 
 
-def chunk_words_by_sentence_and_length(words):
+def chunk_translated_text_by_time(translated_text, start_time_delta, end_time_delta):
     """
-    Groups a list of GCP WordInfo objects into readable subtitle chunks based on punctuation and maximum word count limit.
+    Takes a fully translated English block, counts words, and uses the
+    German total duration to divide it into evenly timed SRT sub-blocks.
     """
+    words = translated_text.split()
+    if not words:
+        return []
+
+    total_duration = (end_time_delta - start_time_delta).total_seconds()
+    time_per_word = total_duration / len(words)
+
     chunks = []
-    current_chunk = []
+    current_chunk_words = []
 
-    for word_info in words:
-        current_chunk.append(word_info)
-        word_text = word_info.word.strip()
+    for i, word in enumerate(words):
+        current_chunk_words.append(word)
+        word_text = word.strip()
 
-        reached_max_length = len(current_chunk) >= MAX_WORDS_PER_SUBTITLE
+        reached_max = len(current_chunk_words) >= MAX_WORDS_PER_SUBTITLE
         is_sentence_end = word_text.endswith(PUNCTUATION_SPLITS)
 
-        if reached_max_length or is_sentence_end:
-            chunks.append(current_chunk)
-            current_chunk = []
+        if reached_max or is_sentence_end:
+            # Determine timings based on word index
+            chunk_start_idx = i - len(current_chunk_words) + 1
+            chunk_end_idx = i
 
-    if current_chunk:
-        chunks.append(current_chunk)
+            chunk_start_time = start_time_delta + timedelta(
+                seconds=chunk_start_idx * time_per_word
+            )
+            chunk_end_time = start_time_delta + timedelta(
+                seconds=(chunk_end_idx + 1) * time_per_word
+            )
+
+            chunks.append(
+                {
+                    "text": " ".join(current_chunk_words),
+                    "start": chunk_start_time,
+                    "end": chunk_end_time,
+                }
+            )
+            current_chunk_words = []
+
+    if current_chunk_words:
+        chunk_start_idx = len(words) - len(current_chunk_words)
+        chunk_end_idx = len(words) - 1
+
+        chunk_start_time = start_time_delta + timedelta(
+            seconds=chunk_start_idx * time_per_word
+        )
+        chunk_end_time = end_time_delta  # Hard stop at the actual end of the audio
+
+        chunks.append(
+            {
+                "text": " ".join(current_chunk_words),
+                "start": chunk_start_time,
+                "end": chunk_end_time,
+            }
+        )
+
     return chunks
 
 
@@ -122,7 +163,7 @@ def main():
         operation = speech_client.long_running_recognize(config=config, audio=audio)
         response = operation.result(timeout=600)
 
-        print("[4/5] Translating text and generating SRT file...")
+        print("[4/5] Translating full context and interpolating subtitle timings...")
 
         srt_filename = VIDEO_FILE_PATH.replace(".mp4", ".srt")
         srt_content = ""
@@ -130,26 +171,30 @@ def main():
 
         for result in response.results:
             alternative = result.alternatives[0]
-            subtitle_chunks = chunk_words_by_sentence_and_length(alternative.words)
 
-            for chunk in subtitle_chunks:
-                chunk_text = " ".join([w.word for w in chunk])
+            # 1. Grab the WHOLE German paragraph and actual audio limits
+            full_german_text = alternative.transcript
+            paragraph_start = alternative.words[0].start_time
+            paragraph_end = alternative.words[-1].end_time
 
-                translation = translate_client.translate(
-                    chunk_text, target_language="en"
-                )
-                translated_text = translation["translatedText"]
+            # 2. Translate the WHOLE paragraph (preserving context!)
+            translation = translate_client.translate(
+                full_german_text, target_language="en"
+            )
+            full_english_text = html.unescape(translation["translatedText"])
 
-                neat_translated_text = wrap_text_to_lines(translated_text)
+            # 3. Use smart interpolation to split the English words across the German timeline
+            english_chunks = chunk_translated_text_by_time(
+                full_english_text, paragraph_start, paragraph_end
+            )
 
-                start_time = chunk[0].start_time
-                end_time = chunk[-1].end_time
+            # 4. Write SRT
+            for chunk in english_chunks:
+                neat_text = wrap_text_to_lines(chunk["text"])
 
                 srt_content += f"{counter}\n"
-                srt_content += (
-                    f"{format_srt_time(start_time)} --> {format_srt_time(end_time)}\n"
-                )
-                srt_content += f"{translated_text}\n\n"
+                srt_content += f"{format_srt_time(chunk['start'])} --> {format_srt_time(chunk['end'])}\n"
+                srt_content += f"{neat_text}\n\n"
 
                 counter += 1
 
