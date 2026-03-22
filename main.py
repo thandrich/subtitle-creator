@@ -16,6 +16,11 @@ SOURCE_LANGUAGE = "de-DE"
 PROJECT_ID = os.environ.get("GCP_PROJECT_ID")
 BUCKET_NAME = os.environ.get("GCP_BUCKET_NAME")
 
+# Adjustable subtitle constraints
+MAX_WORDS_PER_SUBTITLE = 16
+MAX_CHARS_PER_LINE = 42
+PUNCTUATION_SPLITS = (".", "?", "!", ":")
+
 
 def format_srt_time(time_delta):
     """Converts a timedelta onject into the standard SRT timestamp format."""
@@ -25,6 +30,55 @@ def format_srt_time(time_delta):
     seconds = int(total_seconds % 60)
     miliseconds = int((total_seconds - int(total_seconds)) * 1000)
     return f"{hours:02}:{minutes:02}:{seconds:02},{miliseconds:03}"
+
+
+def chunk_words_by_sentence_and_length(words):
+    """
+    Groups a list of GCP WordInfo objects into readable subtitle chunks based on punctuation and maximum word count limit.
+    """
+    chunks = []
+    current_chunk = []
+
+    for word_info in words:
+        current_chunk.append(word_info)
+        word_text = word_info.word.strip()
+
+        reached_max_length = len(current_chunk) >= MAX_WORDS_PER_SUBTITLE
+        is_sentence_end = word_text.endswith(PUNCTUATION_SPLITS)
+
+        if reached_max_length or is_sentence_end:
+            chunks.append(current_chunk)
+            current_chunk = []
+
+    if current_chunk:
+        chunks.append(current_chunk)
+    return chunks
+
+
+def wrap_text_to_lines(text, max_chars=MAX_CHARS_PER_LINE):
+    """
+    Intelligently splits a string into two lines (max 2 lines for SRT readability)
+    without breaking words in half.
+    """
+    words = text.split()
+    lines = []
+    current_line = []
+    current_length = 0
+
+    for word in words:
+        if current_length + len(word) + 1 > max_chars and current_line:
+            lines.append(" ".join(current_line))
+            current_line = [word]
+            current_length = len(word)
+        else:
+            current_line.append(word)
+            current_length += len(word) + 1
+
+    if current_line:
+        lines.append(" ".join(current_line))
+
+    # Join the lines using standard newline characters
+    return "\n".join(lines)
 
 
 def main():
@@ -76,21 +130,28 @@ def main():
 
         for result in response.results:
             alternative = result.alternatives[0]
-            original_text = alternative.transcript
-            translation = translate_client.translate(
-                original_text, target_language="en"
-            )
-            english_text = translation["translatedText"]
-            start_time = alternative.words[0].start_time
-            end_time = alternative.words[-1].end_time
+            subtitle_chunks = chunk_words_by_sentence_and_length(alternative.words)
 
-            srt_content += f"{counter}\n"
-            srt_content += (
-                f"{format_srt_time(start_time)} --> {format_srt_time(end_time)}\n"
-            )
-            srt_content += f"{english_text}\n\n"
+            for chunk in subtitle_chunks:
+                chunk_text = " ".join([w.word for w in chunk])
 
-            counter += 1
+                translation = translate_client.translate(
+                    chunk_text, target_language="en"
+                )
+                translated_text = translation["translatedText"]
+
+                neat_translated_text = wrap_text_to_lines(translated_text)
+
+                start_time = chunk[0].start_time
+                end_time = chunk[-1].end_time
+
+                srt_content += f"{counter}\n"
+                srt_content += (
+                    f"{format_srt_time(start_time)} --> {format_srt_time(end_time)}\n"
+                )
+                srt_content += f"{translated_text}\n\n"
+
+                counter += 1
 
         with open(srt_filename, "w", encoding="utf-8") as f:
             f.write(srt_content)
