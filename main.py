@@ -1,4 +1,3 @@
-import argparse
 import html
 import logging
 import os
@@ -6,7 +5,9 @@ import signal
 import sys
 import time
 from datetime import timedelta
+from typing import Annotated, Optional
 
+import typer
 from dotenv import load_dotenv
 from google.api_core.client_options import ClientOptions
 from google.cloud import speech_v2 as speech
@@ -14,9 +15,22 @@ from google.cloud import storage
 from google.cloud import translate_v2 as translate
 from google.cloud.speech_v2.types import cloud_speech
 from moviepy import VideoFileClip
-from tqdm import tqdm
+from rich.console import Console
+from rich.logging import RichHandler
+from rich.progress import (
+    BarColumn,
+    Progress,
+    SpinnerColumn,
+    TextColumn,
+    TimeElapsedColumn,
+)
+from rich.table import Table
 
 load_dotenv()
+
+console = Console()
+
+app = typer.Typer(help="Subtitle Creator Pipeline")
 
 # --- Configuration ---
 AUDIO_FILE_PATH = "temp_audio.wav"
@@ -208,118 +222,140 @@ def process_video(
     global CURRENT_GCS_BLOB_NAME
     # Main logic wrapped in try block to enable cleanup even upon failure
     try:
-        logging.info(f"\nProcessing: {video_file_path}")
-        logging.info("[1/5] Extracting audio form video...")
+        console.print(f"\n[bold blue]Processing:[/bold blue] {video_file_path}")
 
-        video = VideoFileClip(video_file_path)
-        video.audio.write_audiofile(
-            AUDIO_FILE_PATH,
-            fps=16000,
-            nbytes=2,
-            codec="pcm_s16le",
-            logger=None,
-        )
+        with Progress(
+            SpinnerColumn(),
+            TextColumn("[progress.description]{task.description}"),
+            BarColumn(),
+            TextColumn("[progress.percentage]{task.percentage:>3.0f}%"),
+            TimeElapsedColumn(),
+            console=console,
+        ) as progress:
+            # 1. Audio Extraction
+            extract_task = progress.add_task(
+                "Extracting audio...", total=None
+            )  # indeterminate
+            video = VideoFileClip(video_file_path)
+            video.audio.write_audiofile(
+                AUDIO_FILE_PATH,
+                fps=16000,
+                nbytes=2,
+                codec="pcm_s16le",
+                logger=None,
+            )
+            progress.update(extract_task, completed=100, description="Audio extracted")
 
-        logging.info("[2/5] Uploading temporary audio to Google Cloud Storage ...")
+            # 2. Upload to GCS
+            upload_task = progress.add_task("Uploading to GCS...", total=100)
+            CURRENT_GCS_BLOB_NAME = (
+                os.path.basename(video_file_path) + "_" + AUDIO_FILE_PATH
+            )
+            bucket = storage_client.bucket(BUCKET_NAME)
+            blob = bucket.blob(CURRENT_GCS_BLOB_NAME)
 
-        CURRENT_GCS_BLOB_NAME = (
-            os.path.basename(video_file_path) + "_" + AUDIO_FILE_PATH
-        )
-        bucket = storage_client.bucket(BUCKET_NAME)
-        blob = bucket.blob(CURRENT_GCS_BLOB_NAME)
-        blob.upload_from_filename(AUDIO_FILE_PATH)
-        gcs_uri = f"gs://{BUCKET_NAME}/{CURRENT_GCS_BLOB_NAME}"
+            # Simple upload without chunked progress for now to keep it surgical,
+            # but using rich progress bar for the UI feel.
+            blob.upload_from_filename(AUDIO_FILE_PATH)
+            progress.update(upload_task, completed=100, description="Uploaded to GCS")
 
-        logging.info(
-            "[3/5] Transcribing audio with timestamps (this might take a while)..."
-        )
+            # 3. Transcription
+            transcribe_task = progress.add_task(
+                "Transcribing (GCP Chirp)...", total=None
+            )
 
-        config = cloud_speech.RecognitionConfig(
-            explicit_decoding_config=cloud_speech.ExplicitDecodingConfig(
-                encoding=cloud_speech.ExplicitDecodingConfig.AudioEncoding.LINEAR16,
-                sample_rate_hertz=16000,
-                audio_channel_count=2,
-            ),
-            model="chirp_3",
-            language_codes=[source_lang],
-            features=cloud_speech.RecognitionFeatures(
-                enable_word_time_offsets=True,
-                enable_automatic_punctuation=True,
-                diarization_config=cloud_speech.SpeakerDiarizationConfig(
-                    min_speaker_count=1,
-                    max_speaker_count=6,
+            config = cloud_speech.RecognitionConfig(
+                explicit_decoding_config=cloud_speech.ExplicitDecodingConfig(
+                    encoding=cloud_speech.ExplicitDecodingConfig.AudioEncoding.LINEAR16,
+                    sample_rate_hertz=16000,
+                    audio_channel_count=2,
                 ),
-            ),
-        )
+                model="chirp_3",
+                language_codes=[source_lang],
+                features=cloud_speech.RecognitionFeatures(
+                    enable_word_time_offsets=True,
+                    enable_automatic_punctuation=True,
+                    diarization_config=cloud_speech.SpeakerDiarizationConfig(
+                        min_speaker_count=1,
+                        max_speaker_count=6,
+                    ),
+                ),
+            )
 
-        request = cloud_speech.BatchRecognizeRequest(
-            recognizer=f"projects/{PROJECT_ID}/locations/{GCP_REGION}/recognizers/_",
-            config=config,
-            files=[cloud_speech.BatchRecognizeFileMetadata(uri=gcs_uri)],
-            recognition_output_config=cloud_speech.RecognitionOutputConfig(
-                inline_output_config=cloud_speech.InlineOutputConfig(),
-            ),
-        )
+            request = cloud_speech.BatchRecognizeRequest(
+                recognizer=f"projects/{PROJECT_ID}/locations/{GCP_REGION}/recognizers/_",
+                config=config,
+                files=[cloud_speech.BatchRecognizeFileMetadata(uri=gcs_uri := f"gs://{BUCKET_NAME}/{CURRENT_GCS_BLOB_NAME}")],
+                recognition_output_config=cloud_speech.RecognitionOutputConfig(
+                    inline_output_config=cloud_speech.InlineOutputConfig(),
+                ),
+            )
 
-        operation = speech_client.batch_recognize(request=request)
+            operation = speech_client.batch_recognize(request=request)
 
-        # Progress tracking for the LRO
-        with tqdm(desc="Transcribing", unit="s", total=None) as pbar:
             while not operation.done():
                 time.sleep(1)
-                pbar.update(1)
+                progress.advance(transcribe_task, 1)
 
-        response = operation.result(timeout=3600)
-
-        logging.info(
-            "[4/5] Translating full context and interpolating subtitle timings..."
-        )
-
-        file_result = response.results[gcs_uri]
-        if file_result.error.code:
-            raise Exception(f"STT Error: {file_result.error.message}")
-
-        srt_filename = video_file_path.rsplit(".", 1)[0] + ".srt"
-        srt_content = ""
-        counter = 1
-
-        for result in file_result.inline_result.transcript.results:
-            if not result.alternatives:
-                continue
-
-            alternative = result.alternatives[0]
-            if not alternative.words:
-                continue
-
-            # 1. Grab the WHOLE transcript and actual audio limits
-            full_text = alternative.transcript
-            paragraph_start = alternative.words[0].start_offset
-            paragraph_end = alternative.words[-1].end_offset
-
-            # 2. Translate the WHOLE paragraph (preserving context!)
-            translation = translate_client.translate(
-                full_text, target_language=target_lang
-            )
-            full_translated_text = html.unescape(translation["translatedText"])
-
-            # 3. Use smart interpolation to split the words across the timeline
-            chunks = chunk_translated_text_by_time(
-                full_translated_text, paragraph_start, paragraph_end
+            response = operation.result(timeout=3600)
+            progress.update(
+                transcribe_task, completed=100, description="Transcription complete"
             )
 
-            # 4. Write SRT
-            for chunk in chunks:
-                neat_text = wrap_text_to_lines(chunk["text"])
+            # 4. Translation & SRT
+            process_task = progress.add_task("Translating & Formatting...", total=100)
+            file_result = response.results[gcs_uri]
+            if file_result.error.code:
+                raise Exception(f"STT Error: {file_result.error.message}")
 
-                srt_content += f"{counter}\n"
-                srt_content += f"{format_srt_time(chunk['start'])} --> {format_srt_time(chunk['end'])}\n"
-                srt_content += f"{neat_text}\n\n"
+            srt_filename = video_file_path.rsplit(".", 1)[0] + ".srt"
+            srt_content = ""
+            counter = 1
 
-                counter += 1
+            results = file_result.inline_result.transcript.results
+            total_results = len(results)
 
-        with open(srt_filename, "w", encoding="utf-8") as f:
-            f.write(srt_content)
-            logging.info(f"[5/5] Success! Subtitles saved to {srt_filename}")
+            for i, result in enumerate(results):
+                if not result.alternatives:
+                    continue
+
+                alternative = result.alternatives[0]
+                if not alternative.words:
+                    continue
+
+                # 1. Grab the WHOLE transcript and actual audio limits
+                full_text = alternative.transcript
+                paragraph_start = alternative.words[0].start_offset
+                paragraph_end = alternative.words[-1].end_offset
+
+                # 2. Translate the WHOLE paragraph (preserving context!)
+                translation = translate_client.translate(
+                    full_text, target_language=target_lang
+                )
+                full_translated_text = html.unescape(translation["translatedText"])
+
+                # 3. Use smart interpolation to split the words across the timeline
+                chunks = chunk_translated_text_by_time(
+                    full_translated_text, paragraph_start, paragraph_end
+                )
+
+                # 4. Write SRT
+                for chunk in chunks:
+                    neat_text = wrap_text_to_lines(chunk["text"])
+
+                    srt_content += f"{counter}\n"
+                    srt_content += f"{format_srt_time(chunk['start'])} --> {format_srt_time(chunk['end'])}\n"
+                    srt_content += f"{neat_text}\n\n"
+
+                    counter += 1
+
+                progress.update(process_task, completed=int((i+1)/total_results * 100))
+
+            with open(srt_filename, "w", encoding="utf-8") as f:
+                f.write(srt_content)
+
+            progress.update(process_task, completed=100, description="SRT saved")
+            console.print(f"[bold green]Success![/bold green] Subtitles saved to {srt_filename}")
 
     finally:
         cleanup()
@@ -341,17 +377,100 @@ def pre_flight_checks(storage_client):
         raise RuntimeError(f"Could not access GCS bucket '{BUCKET_NAME}': {e}")
 
 
-def main():
+def display_summary_dashboard(video_files):
+    """Shows a summary table of files to be processed and estimated costs."""
+    table = Table(title="Pipeline Summary Dashboard", show_header=True, header_style="bold magenta")
+    table.add_column("File Name", style="dim")
+    table.add_column("Duration", justify="right")
+    table.add_column("Est. STT Cost", justify="right")
+
+    total_duration = 0
+
+    with Progress(
+        SpinnerColumn(),
+        TextColumn("[progress.description]{task.description}"),
+        console=console,
+        transient=True,
+    ) as progress:
+        task = progress.add_task("Analysing files...", total=len(video_files))
+        for video_file in video_files:
+            try:
+                clip = VideoFileClip(video_file)
+                duration = clip.duration
+                clip.close()
+
+                cost = (duration / 60) * 0.016 # $0.016 per minute for Chirp
+                table.add_row(
+                    os.path.basename(video_file),
+                    f"{duration:.2f}s",
+                    f"${cost:.4f}"
+                )
+                total_duration += duration
+            except Exception:
+                table.add_row(os.path.basename(video_file), "Error", "N/A")
+            progress.advance(task)
+
+    total_cost = (total_duration / 60) * 0.016
+    table.add_section()
+    table.add_row("Total", f"{total_duration:.2f}s", f"${total_cost:.4f}", style="bold green")
+
+    console.print(table)
+    if not typer.confirm("Proceed with processing?"):
+        raise typer.Abort()
+
+
+@app.command()
+def create_subtitles(
+    input_path: Annotated[
+        Optional[str],
+        typer.Argument(
+            help="Path to an MP4 video file or a directory containing MP4 files"
+        ),
+    ] = None,
+    source_lang: Annotated[
+        Optional[str], typer.Option(help="Source language code")
+    ] = None,
+    target_lang: Annotated[
+        Optional[str], typer.Option(help="Target language code")
+    ] = None,
+    max_words: Annotated[
+        int, typer.Option(help="Max words per subtitle block")
+    ] = MAX_WORDS_PER_SUBTITLE,
+    max_chars: Annotated[
+        int, typer.Option(help="Max characters per line")
+    ] = MAX_CHARS_PER_LINE,
+    min_duration: Annotated[
+        float, typer.Option(help="Min duration for a subtitle block in seconds")
+    ] = MIN_DURATION,
+    punctuation_splits: Annotated[
+        str, typer.Option(help="Comma-separated punctuation marks to split on")
+    ] = ".,?,!,:",
+):
+    """
+    Subtitle Creator Pipeline: Transforms video into translated subtitles.
+    """
     global MAX_WORDS_PER_SUBTITLE, MAX_CHARS_PER_LINE, MIN_DURATION, PUNCTUATION_SPLITS
     global GLOBAL_STORAGE_CLIENT
+
+    # Interactive Mode
+    if input_path is None:
+        console.print("[bold cyan]Welcome to Subtitle Creator Interactive Mode![/bold cyan]")
+        input_path = typer.prompt("Enter the path to the video file or directory")
+
+    if source_lang is None:
+        source_lang = typer.prompt("Enter source language code", default="ja-JP")
+
+    if target_lang is None:
+        target_lang = typer.prompt("Enter target language code", default="en")
 
     # Configure logging
     logging.basicConfig(
         level=logging.INFO,
-        format="%(asctime)s [%(levelname)s] %(message)s",
+        format="%(message)s",
+        datefmt="[%X]",
         handlers=[
+            RichHandler(console=console, rich_tracebacks=True),
             logging.FileHandler("pipeline.log"),
-            logging.StreamHandler(sys.stdout),
         ],
     )
 
@@ -359,56 +478,11 @@ def main():
     signal.signal(signal.SIGINT, signal_handler)
     signal.signal(signal.SIGTERM, signal_handler)
 
-    parser = argparse.ArgumentParser(description="Subtitle Creator Pipeline")
-
-    parser.add_argument(
-        "input_path",
-        help="Path to an MP4 video file or a directory containing MP4 files",
-    )
-    parser.add_argument(
-        "--source-lang",
-        default="ja-JP",
-        help="Source language code (default: ja-JP)",
-    )
-    parser.add_argument(
-        "--target-lang",
-        default="en",
-        help="Target language code (default: en)",
-    )
-    parser.add_argument(
-        "--max-words",
-        type=int,
-        default=MAX_WORDS_PER_SUBTITLE,
-        help=f"Max words per subtitle block (default: {MAX_WORDS_PER_SUBTITLE})",
-    )
-    parser.add_argument(
-        "--max-chars",
-        type=int,
-        default=MAX_CHARS_PER_LINE,
-        help=f"Max characters per line (default: {MAX_CHARS_PER_LINE})",
-    )
-    parser.add_argument(
-        "--min-duration",
-        type=float,
-        default=MIN_DURATION,
-        help=f"Min duration for a subtitle block in seconds (default: {MIN_DURATION})",
-    )
-    parser.add_argument(
-        "--punctuation-splits",
-        default=".,?,!,:",
-        help="Comma-separated punctuation marks to split on (default: .,?,!,:)",
-    )
-    args = parser.parse_args()
-
-    input_path = args.input_path
-    source_lang = args.source_lang
-    target_lang = args.target_lang
-
     # Override globals with CLI arguments for this run
-    MAX_WORDS_PER_SUBTITLE = args.max_words
-    MAX_CHARS_PER_LINE = args.max_chars
-    MIN_DURATION = args.min_duration
-    PUNCTUATION_SPLITS = tuple(args.punctuation_splits.split(","))
+    MAX_WORDS_PER_SUBTITLE = max_words
+    MAX_CHARS_PER_LINE = max_chars
+    MIN_DURATION = min_duration
+    PUNCTUATION_SPLITS = tuple(punctuation_splits.split(","))
 
     logging.info("Starting sutitle pipeline...")
 
@@ -444,6 +518,13 @@ def main():
         logging.error(f"Error: {input_path} is not a valid file or directory.")
         return
 
+    # Show dashboard
+    try:
+        display_summary_dashboard(video_files)
+    except typer.Abort:
+        console.print("[yellow]Operation cancelled by user.[/yellow]")
+        return
+
     for video_file in video_files:
         try:
             process_video(
@@ -461,4 +542,4 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    app()

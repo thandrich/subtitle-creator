@@ -9,7 +9,9 @@ dependencies = [
     "google-cloud-storage>=3.10.0",
     "google-cloud-translate>=3.24.0",
     "moviepy>=2.2.1",
+    "rich>=15.0.0",
     "tqdm>=4.66.0",
+    "typer>=0.25.0",
 ]
 
 [dependency-groups]
