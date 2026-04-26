@@ -1,3 +1,4 @@
+import argparse
 import html
 import math
 import os
@@ -11,16 +12,16 @@ from moviepy import VideoFileClip
 load_dotenv()
 
 # --- Configuratoin ---
-VIDEO_FILE_PATH = "test/BHG-049.mp4"
 AUDIO_FILE_PATH = "temp_audio.wav"
-SOURCE_LANGUAGE = "ja-JP"
 PROJECT_ID = os.environ.get("GCP_PROJECT_ID")
 BUCKET_NAME = os.environ.get("GCP_BUCKET_NAME")
 
+
 # Adjustable subtitle constraints
-MAX_WORDS_PER_SUBTITLE = 16
-MAX_CHARS_PER_LINE = 42
-PUNCTUATION_SPLITS = (".", "?", "!", ":")
+MAX_WORDS_PER_SUBTITLE = int(os.environ.get("MAX_WORDS_PER_SUBTITLE", 16))
+MAX_CHARS_PER_LINE = int(os.environ.get("MAX_CHARS_PER_LINE", 42))
+MIN_DURATION = float(os.environ.get("MIN_DURATION", 1.2))
+PUNCTUATION_SPLITS = tuple(os.environ.get("PUNCTUATION_SPLITS", ".,?,!,:").split(","))
 
 
 def format_srt_time(time_delta):
@@ -38,8 +39,6 @@ def chunk_translated_text_by_time(translated_text, start_time_delta, end_time_de
     Groups English words into bite-sized SRT sub-blocks based on timeline interpolation,
     and intelligently merges micro-blocks (less than 1.2s) to prevent unreadable single-word flicker.
     """
-    MIN_DURATION = 1.2  # Minimum readable duration for a subtitle block in seconds
-
     words = translated_text.split()
     if not words:
         return []
@@ -152,19 +151,21 @@ def wrap_text_to_lines(text, max_chars=MAX_CHARS_PER_LINE):
     return "\n".join(lines)
 
 
-def main():
-    print("Starting sutitle pipeline...")
-
-    # Initialise our GCP clients
-    storage_client = storage.Client(project=PROJECT_ID)
-    speech_client = speech.SpeechClient()
-    translate_client = translate.Client()
-
+def process_video(
+    video_file_path,
+    source_lang,
+    target_lang,
+    storage_client,
+    speech_client,
+    translate_client,
+):
+    """Processes a single video file through the subtitle pipeline."""
     # Main logic wrapped in try block to enable cleanup even upon failure
     try:
-        print("\n[1/5] Extracting audio form video...")
+        print(f"\nProcessing: {video_file_path}")
+        print("[1/5] Extracting audio form video...")
 
-        video = VideoFileClip(VIDEO_FILE_PATH)
+        video = VideoFileClip(video_file_path)
         video.audio.write_audiofile(
             AUDIO_FILE_PATH,
             fps=16000,
@@ -186,7 +187,7 @@ def main():
         config = speech.RecognitionConfig(
             encoding=speech.RecognitionConfig.AudioEncoding.LINEAR16,
             sample_rate_hertz=16000,
-            language_code=SOURCE_LANGUAGE,
+            language_code=source_lang,
             enable_word_time_offsets=True,
             audio_channel_count=2,
         )
@@ -195,31 +196,31 @@ def main():
 
         print("[4/5] Translating full context and interpolating subtitle timings...")
 
-        srt_filename = VIDEO_FILE_PATH.replace(".mp4", ".srt")
+        srt_filename = video_file_path.rsplit(".", 1)[0] + ".srt"
         srt_content = ""
         counter = 1
 
         for result in response.results:
             alternative = result.alternatives[0]
 
-            # 1. Grab the WHOLE German paragraph and actual audio limits
-            full_german_text = alternative.transcript
+            # 1. Grab the WHOLE transcript and actual audio limits
+            full_text = alternative.transcript
             paragraph_start = alternative.words[0].start_time
             paragraph_end = alternative.words[-1].end_time
 
             # 2. Translate the WHOLE paragraph (preserving context!)
             translation = translate_client.translate(
-                full_german_text, target_language="en"
+                full_text, target_language=target_lang
             )
-            full_english_text = html.unescape(translation["translatedText"])
+            full_translated_text = html.unescape(translation["translatedText"])
 
-            # 3. Use smart interpolation to split the English words across the German timeline
-            english_chunks = chunk_translated_text_by_time(
-                full_english_text, paragraph_start, paragraph_end
+            # 3. Use smart interpolation to split the words across the timeline
+            chunks = chunk_translated_text_by_time(
+                full_translated_text, paragraph_start, paragraph_end
             )
 
             # 4. Write SRT
-            for chunk in english_chunks:
+            for chunk in chunks:
                 neat_text = wrap_text_to_lines(chunk["text"])
 
                 srt_content += f"{counter}\n"
@@ -249,7 +250,94 @@ def main():
                     f" -> Could not delete GCS file. You may need to check manually. Error: {e}"
                 )
 
-        print("Cleanup complete. Pipeline finished.")
+        print("Cleanup complete for this file.")
+
+
+def main():
+    global MAX_WORDS_PER_SUBTITLE, MAX_CHARS_PER_LINE, MIN_DURATION, PUNCTUATION_SPLITS
+    parser = argparse.ArgumentParser(description="Subtitle Creator Pipeline")
+    parser.add_argument(
+        "input_path",
+        help="Path to an MP4 video file or a directory containing MP4 files",
+    )
+    parser.add_argument(
+        "--source-lang",
+        default="ja-JP",
+        help="Source language code (default: ja-JP)",
+    )
+    parser.add_argument(
+        "--target-lang",
+        default="en",
+        help="Target language code (default: en)",
+    )
+    parser.add_argument(
+        "--max-words",
+        type=int,
+        default=MAX_WORDS_PER_SUBTITLE,
+        help=f"Max words per subtitle block (default: {MAX_WORDS_PER_SUBTITLE})",
+    )
+    parser.add_argument(
+        "--max-chars",
+        type=int,
+        default=MAX_CHARS_PER_LINE,
+        help=f"Max characters per line (default: {MAX_CHARS_PER_LINE})",
+    )
+    parser.add_argument(
+        "--min-duration",
+        type=float,
+        default=MIN_DURATION,
+        help=f"Min duration for a subtitle block in seconds (default: {MIN_DURATION})",
+    )
+    parser.add_argument(
+        "--punctuation-splits",
+        default=".,?,!,:",
+        help=f"Comma-separated punctuation marks to split on (default: .,?,!,:)",
+    )
+    args = parser.parse_args()
+
+    input_path = args.input_path
+    source_lang = args.source_lang
+    target_lang = args.target_lang
+
+    # Override globals with CLI arguments for this run
+    MAX_WORDS_PER_SUBTITLE = args.max_words
+    MAX_CHARS_PER_LINE = args.max_chars
+    MIN_DURATION = args.min_duration
+    PUNCTUATION_SPLITS = tuple(args.punctuation_splits.split(","))
+
+    print("Starting sutitle pipeline...")
+
+    # Initialise our GCP clients
+    storage_client = storage.Client(project=PROJECT_ID)
+    speech_client = speech.SpeechClient()
+    translate_client = translate.Client()
+
+    # Determine input files
+    if os.path.isdir(input_path):
+        video_files = [
+            os.path.join(input_path, f)
+            for f in os.listdir(input_path)
+            if f.lower().endswith(".mp4")
+        ]
+        video_files.sort()
+        print(f"Found {len(video_files)} MP4 files in directory: {input_path}")
+    elif os.path.isfile(input_path):
+        video_files = [input_path]
+    else:
+        print(f"Error: {input_path} is not a valid file or directory.")
+        return
+
+    for video_file in video_files:
+        process_video(
+            video_file,
+            source_lang,
+            target_lang,
+            storage_client,
+            speech_client,
+            translate_client,
+        )
+
+    print("\nAll tasks completed.")
 
 
 if __name__ == "__main__":

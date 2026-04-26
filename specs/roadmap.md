@@ -5,11 +5,11 @@ This roadmap outlines the evolution of the Subtitle Creator from a hardcoded scr
 ## Phase 1: Configuration & CLI (Adjustability)
 *Goal: Remove hardcoded values and allow user-defined parameters.*
 
-- [ ] **Commit 1**: Integrate `argparse` to allow passing the input video path as a command-line argument.
-- [ ] **Commit 2**: Add CLI arguments for `--source-lang` and `--target-lang` (defaulting to `ja-JP` and `en`).
-- [ ] **Commit 3**: Implement a `config.yaml` or `.env` expansion to manage subtitle constraints (max chars, max words, min duration).
-- [ ] **Commit 4**: Add CLI flags for all subtitle layout parameters to allow per-run overrides.
-- [ ] **Commit 5**: Support directory-based processing to batch-generate subtitles for multiple videos.
+- [x] **Commit 1**: Integrate `argparse` to allow passing the input video path as a command-line argument.
+- [x] **Commit 2**: Add CLI arguments for `--source-lang` and `--target-lang` (defaulting to `ja-JP` and `en`).
+- [x] **Commit 3**: Implement a `config.yaml` or `.env` expansion to manage subtitle constraints (max chars, max words, min duration).
+- [x] **Commit 4**: Add CLI flags for all subtitle layout parameters to allow per-run overrides.
+- [x] **Commit 5**: Support directory-based processing to batch-generate subtitles for multiple videos.
 
 ## Phase 2: Reliability & Resource Management
 *Goal: Ensure GCP resources are managed safely and provide better feedback.*
