@@ -26,10 +26,10 @@ This roadmap outlines the evolution of the Subtitle Creator from a hardcoded scr
 **Technical Recommendation: TUI (Text User Interface)**
 We recommend using **Typer** (for CLI structure) and **Rich** (for the UI components). This keeps the repository "minimal" (no web server overhead) while providing an interactive, visually appealing interface with progress bars, tables, and formatted prompts.
 
-- [ ] **Commit 11**: Refactor CLI to use `Typer` for a more interactive command structure.
-- [ ] **Commit 12**: Implement `Rich` progress bars for audio extraction and upload stages.
-- [ ] **Commit 13**: Add an "Interactive Mode" that prompts the user for languages and files if no arguments are provided.
-- [ ] **Commit 14**: Create a status dashboard showing active GCP jobs and estimated costs/time.
+- [x] **Commit 11**: Refactor CLI to use `Typer` for a more interactive command structure.
+- [x] **Commit 12**: Implement `Rich` progress bars for audio extraction and upload stages.
+- [x] **Commit 13**: Add an "Interactive Mode" that prompts the user for languages and files if no arguments are provided.
+- [x] **Commit 14**: Create a status dashboard showing active GCP jobs and estimated costs/time.
 
 ## Phase 4: UX Rounding & Polish (Additional Suggestions)
 *Goal: Enhance the user experience without adding significant bloat.*
