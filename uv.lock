@@ -745,6 +745,7 @@ dependencies = [
     { name = "google-cloud-storage" },
     { name = "google-cloud-translate" },
     { name = "moviepy" },
+    { name = "tqdm" },
 ]
 
 [package.dev-dependencies]
@@ -758,6 +759,7 @@ requires-dist = [
     { name = "google-cloud-storage", specifier = ">=3.10.0" },
     { name = "google-cloud-translate", specifier = ">=3.24.0" },
     { name = "moviepy", specifier = ">=2.2.1" },
+    { name = "tqdm", specifier = ">=4.66.0" },
 ]
 
 [package.metadata.requires-dev]

@@ -14,10 +14,11 @@ This roadmap outlines the evolution of the Subtitle Creator from a hardcoded scr
 ## Phase 2: Reliability & Resource Management
 *Goal: Ensure GCP resources are managed safely and provide better feedback.*
 
-- [ ] **Commit 6**: Add "Pre-flight" checks to validate GCP credentials and bucket access before starting audio extraction.
-- [ ] **Commit 7**: Implement progress tracking for the GCP Long Running Recognize operation (using `tqdm` or simple polling).
-- [ ] **Commit 8**: Enhance cleanup logic with signal handling (e.g., `SIGINT`) to ensure GCS blobs are deleted even if the process is aborted.
-- [ ] **Commit 9**: Add structured logging to a file (`pipeline.log`) to track errors and timing for each stage.
+- [x] **Commit 6**: Migrate to Speech-to-Text V2 API and optimize configuration using the `chirp_3` model for enhanced accuracy and language support.
+- [x] **Commit 7**: Add "Pre-flight" checks to validate GCP credentials and bucket access before starting audio extraction.
+- [x] **Commit 8**: Implement progress tracking for the GCP Long Running Recognize operation (using `tqdm` or simple polling).
+- [x] **Commit 9**: Enhance cleanup logic with signal handling (e.g., `SIGINT`) to ensure GCS blobs are deleted even if the process is aborted.
+- [x] **Commit 10**: Add structured logging to a file (`pipeline.log`) to track errors and timing for each stage.
 
 ## Phase 3: Minimal User Interface
 *Goal: Provide an intuitive way to set parameters without complex CLI flags.*
@@ -25,15 +26,15 @@ This roadmap outlines the evolution of the Subtitle Creator from a hardcoded scr
 **Technical Recommendation: TUI (Text User Interface)**
 We recommend using **Typer** (for CLI structure) and **Rich** (for the UI components). This keeps the repository "minimal" (no web server overhead) while providing an interactive, visually appealing interface with progress bars, tables, and formatted prompts.
 
-- [ ] **Commit 10**: Refactor CLI to use `Typer` for a more interactive command structure.
-- [ ] **Commit 11**: Implement `Rich` progress bars for audio extraction and upload stages.
-- [ ] **Commit 12**: Add an "Interactive Mode" that prompts the user for languages and files if no arguments are provided.
-- [ ] **Commit 13**: Create a status dashboard showing active GCP jobs and estimated costs/time.
+- [ ] **Commit 11**: Refactor CLI to use `Typer` for a more interactive command structure.
+- [ ] **Commit 12**: Implement `Rich` progress bars for audio extraction and upload stages.
+- [ ] **Commit 13**: Add an "Interactive Mode" that prompts the user for languages and files if no arguments are provided.
+- [ ] **Commit 14**: Create a status dashboard showing active GCP jobs and estimated costs/time.
 
 ## Phase 4: UX Rounding & Polish (Additional Suggestions)
 *Goal: Enhance the user experience without adding significant bloat.*
 
-- [ ] **Commit 14**: **Dry-Run Mode**: A flag to simulate the pipeline, showing how text will be chunked without calling paid APIs.
-- [ ] **Commit 15**: **Multi-Format Export**: Support for `.vtt` (WebVTT) export alongside `.srt`.
-- [ ] **Commit 16**: **Audio Pre-processing**: Integration of basic noise reduction or volume normalization to improve transcription accuracy.
-- [ ] **Commit 17**: **Summary Report**: Output a brief summary after completion (total duration, estimated cost, word count).
+- [ ] **Commit 15**: **Dry-Run Mode**: A flag to simulate the pipeline, showing how text will be chunked without calling paid APIs.
+- [ ] **Commit 16**: **Multi-Format Export**: Support for `.vtt` (WebVTT) export alongside `.srt`.
+- [ ] **Commit 17**: **Audio Pre-processing**: Integration of basic noise reduction or volume normalization to improve transcription accuracy.
+- [ ] **Commit 18**: **Summary Report**: Output a brief summary after completion (total duration, estimated cost, word count).
